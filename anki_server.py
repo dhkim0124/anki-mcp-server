@@ -79,5 +79,8 @@ async def get_decks() -> str:
 
 # Start the server when this script is run directly
 if __name__ == "__main__":
+    import os
+
+    transport = os.environ.get("MCP_TRANSPORT", "http")
     # Use stdio transport for Smithery deployment
-    mcp.start(transport="stdio")
+    mcp.start(transport=transport)

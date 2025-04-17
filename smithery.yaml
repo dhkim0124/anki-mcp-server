@@ -1,0 +1,21 @@
+name: anki-mcp-server
+description: Anki MCP server for flashcard management
+version: 0.1.0
+
+startCommand:
+  type: stdio
+  configSchema: {}
+  commandFunction: |-
+    (config) => ({
+      "command": "python",
+      "args": [
+        "anki_server.py"
+      ],
+      "env": {
+        "MCP_TRANSPORT": "stdio"
+      }
+    })
+
+apiInfo:
+  protocol: mcp
+  baseUrl: /api
