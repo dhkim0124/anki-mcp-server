@@ -75,3 +75,9 @@ async def get_decks() -> str:
         return "\n".join(decks) if decks else "No decks found."
     else:
         return f"Failed to get deck list: {decks}"
+
+
+# Start the server when this script is run directly
+if __name__ == "__main__":
+    # Use stdio transport for Smithery deployment
+    mcp.start(transport="stdio")
