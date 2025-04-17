@@ -1,5 +1,7 @@
 # anki-mcp-server
 
+[![smithery badge](https://smithery.ai/badge/@dhkim0124/anki-mcp-server)](https://smithery.ai/server/@dhkim0124/anki-mcp-server)
+
 *Read this in other languages: [English](README.md), [한국어](docs/README_KO.md)*
 
 A Model Context Protocol (MCP) server that connects Claude and Anki, allowing you to easily create flashcards using natural language.
