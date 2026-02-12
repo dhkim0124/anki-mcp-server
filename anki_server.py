@@ -1,3 +1,4 @@
+import base64
 import json
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,16 @@ mcp = FastMCP("anki-mcp-server")
 # Constants for AnkiConnect API communication
 ANKI_CONNECT_URL = "http://localhost:8765"
 ANKI_CONNECT_VERSION = 6
+
+# Media configuration
+MEDIA_MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_MEDIA_TYPES = {
+    "image/jpeg": [".jpg", ".jpeg"],
+    "image/png": [".png"],
+    "audio/mpeg": [".mp3"],
+    "audio/wav": [".wav"],
+    "audio/ogg": [".ogg"],
+}
 
 
 class AnkiConnectError(Exception):
@@ -476,22 +487,37 @@ async def create_card_custom(
     model_name: str,
     fields: Dict[str, str],
     tags: List[str] | None = None,
+    audio: List[Dict[str, str]] | None = None,
+    picture: List[Dict[str, str]] | None = None,
 ) -> str:
-    """Create a card using a custom note type with dynamic fields.
+    """Create a card using a custom note type with dynamic fields and optional media.
 
     Args:
         deck_name: Name of the deck to add the card to
         model_name: Name of the note type/model to use (created via create_note_type)
         fields: Dict of field names to values. Must match the model's fields.
         tags: Optional list of tags
+        audio: Optional list of audio attachments. Each dict should have:
+               - "url" or "data" (base64): the audio source
+               - "filename": target filename in Anki media
+               - "fields": list of field names where [sound:filename] will be inserted
+        picture: Optional list of image attachments. Each dict should have:
+                 - "url" or "data" (base64): the image source
+                 - "filename": target filename in Anki media
+                 - "fields": list of field names where <img src="filename"> will be inserted
     """
     try:
-        note = {
+        note: Dict[str, Any] = {
             "deckName": deck_name,
             "modelName": model_name,
             "fields": fields,
             "tags": tags or [],
         }
+        if audio:
+            note["audio"] = audio
+        if picture:
+            note["picture"] = picture
+
         result = await request_anki("addNote", note=note)
         return json.dumps({
             "success": True,
@@ -563,6 +589,84 @@ async def update_note_type_template(
         return json.dumps({"success": False, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
         return json.dumps({"success": False, "message": f"Connection error: {e}"})
+
+
+# ─── Media (Phase 3) ──────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def add_media(
+    filename: str,
+    data: str,
+    media_type: str,
+) -> str:
+    """Upload an image or audio file to Anki's media folder for use in cards.
+
+    The uploaded file can then be referenced in card fields:
+    - Images: <img src="filename.png">
+    - Audio: [sound:filename.mp3]
+
+    Args:
+        filename: Target filename in Anki media (e.g. "diagram.png", "pronunciation.mp3")
+        data: File content encoded as base64 string
+        media_type: MIME type of the file. Allowed: image/jpeg, image/png, audio/mpeg, audio/wav, audio/ogg
+    """
+    try:
+        # Validate media type
+        if media_type not in ALLOWED_MEDIA_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_MEDIA_TYPES.keys()))
+            return json.dumps({
+                "success": False,
+                "media_path": None,
+                "message": f"Unsupported media type '{media_type}'. Allowed: {allowed}",
+            })
+
+        # Validate base64 and check size
+        try:
+            decoded = base64.b64decode(data, validate=True)
+        except Exception:
+            return json.dumps({
+                "success": False,
+                "media_path": None,
+                "message": "Invalid base64 data.",
+            })
+
+        if len(decoded) > MEDIA_MAX_SIZE_BYTES:
+            max_mb = MEDIA_MAX_SIZE_BYTES // (1024 * 1024)
+            actual_mb = round(len(decoded) / (1024 * 1024), 2)
+            return json.dumps({
+                "success": False,
+                "media_path": None,
+                "message": f"File too large ({actual_mb} MB). Maximum allowed: {max_mb} MB.",
+            })
+
+        # Validate file extension matches media type
+        valid_extensions = ALLOWED_MEDIA_TYPES[media_type]
+        if not any(filename.lower().endswith(ext) for ext in valid_extensions):
+            return json.dumps({
+                "success": False,
+                "media_path": None,
+                "message": f"Filename '{filename}' extension doesn't match type '{media_type}'. Expected: {', '.join(valid_extensions)}",
+            })
+
+        # Upload via AnkiConnect
+        result = await request_anki("storeMediaFile", filename=filename, data=data)
+
+        # Build usage hint
+        if media_type.startswith("image/"):
+            usage = f'<img src="{filename}">'
+        else:
+            usage = f"[sound:{filename}]"
+
+        return json.dumps({
+            "success": True,
+            "media_path": filename,
+            "message": f"Media '{filename}' uploaded successfully. Use in cards: {usage}",
+        })
+    except AnkiConnectError as e:
+        return json.dumps({"success": False, "media_path": None, "message": f"AnkiConnect error: {e}"})
+    except Exception as e:
+        return json.dumps({"success": False, "media_path": None, "message": f"Connection error: {e}"})
 
 
 # ─── Sync ──────────────────────────────────────────────────────────────────────

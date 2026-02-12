@@ -1,9 +1,10 @@
-"""Unit tests for Anki MCP Server — Phase 1 & 2 tools.
+"""Unit tests for Anki MCP Server — Phase 1, 2 & 3 tools.
 
 All tests mock the AnkiConnect HTTP layer via httpx to avoid requiring
 a running Anki instance.
 """
 
+import base64
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -12,6 +13,7 @@ import pytest
 
 from anki_server import (
     AnkiConnectError,
+    add_media,
     create_card,
     create_card_batch,
     create_card_custom,
@@ -665,3 +667,162 @@ class TestUpdateNoteTypeTemplate:
         )
         data = json.loads(raw)
         assert data["success"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 3: Media
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Helper: a tiny valid PNG (1x1 pixel) encoded as base64
+_TINY_PNG_B64 = base64.b64encode(
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+    b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
+    b"\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00"
+    b"\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+).decode()
+
+_TINY_MP3_B64 = base64.b64encode(b"\xff\xfb\x90\x00" + b"\x00" * 64).decode()
+
+
+# ─── add_media ─────────────────────────────────────────────────────────────────
+
+
+class TestAddMedia:
+    @pytest.mark.asyncio
+    async def test_upload_image_success(self):
+        client = _mock_post(result="diagram.png")
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await add_media(
+                filename="diagram.png",
+                data=_TINY_PNG_B64,
+                media_type="image/png",
+            )
+        data = json.loads(raw)
+        assert data["success"] is True
+        assert data["media_path"] == "diagram.png"
+        assert "<img" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_upload_audio_success(self):
+        client = _mock_post(result="word.mp3")
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await add_media(
+                filename="word.mp3",
+                data=_TINY_MP3_B64,
+                media_type="audio/mpeg",
+            )
+        data = json.loads(raw)
+        assert data["success"] is True
+        assert "[sound:" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_rejects_unsupported_type(self):
+        raw = await add_media(
+            filename="doc.pdf",
+            data=_TINY_PNG_B64,
+            media_type="application/pdf",
+        )
+        data = json.loads(raw)
+        assert data["success"] is False
+        assert "unsupported" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_base64(self):
+        raw = await add_media(
+            filename="img.png",
+            data="not-valid-base64!!!",
+            media_type="image/png",
+        )
+        data = json.loads(raw)
+        assert data["success"] is False
+        assert "base64" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_oversized_file(self):
+        # 11 MB of zeros encoded as base64
+        big_data = base64.b64encode(b"\x00" * (11 * 1024 * 1024)).decode()
+        raw = await add_media(
+            filename="huge.png",
+            data=big_data,
+            media_type="image/png",
+        )
+        data = json.loads(raw)
+        assert data["success"] is False
+        assert "too large" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_extension_mismatch(self):
+        raw = await add_media(
+            filename="photo.mp3",
+            data=_TINY_PNG_B64,
+            media_type="image/png",
+        )
+        data = json.loads(raw)
+        assert data["success"] is False
+        assert "extension" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_anki_error(self):
+        client = _mock_post(error="storage error")
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await add_media(
+                filename="img.png",
+                data=_TINY_PNG_B64,
+                media_type="image/png",
+            )
+        data = json.loads(raw)
+        assert data["success"] is False
+        assert "storage error" in data["message"]
+
+
+# ─── create_card_custom with media ────────────────────────────────────────────
+
+
+class TestCreateCardCustomMedia:
+    @pytest.mark.asyncio
+    async def test_with_audio(self):
+        client = _mock_post(result=7777)
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await create_card_custom(
+                deck_name="Lang",
+                model_name="Vocab",
+                fields={"Word": "hola", "Translation": "hello"},
+                audio=[{
+                    "url": "https://example.com/hola.mp3",
+                    "filename": "hola.mp3",
+                    "fields": ["Word"],
+                }],
+            )
+        data = json.loads(raw)
+        assert data["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_with_picture(self):
+        client = _mock_post(result=8888)
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await create_card_custom(
+                deck_name="Bio",
+                model_name="Anatomy",
+                fields={"Name": "Heart", "Description": "Pumps blood"},
+                picture=[{
+                    "url": "https://example.com/heart.png",
+                    "filename": "heart.png",
+                    "fields": ["Name"],
+                }],
+            )
+        data = json.loads(raw)
+        assert data["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_with_both_audio_and_picture(self):
+        client = _mock_post(result=9999)
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await create_card_custom(
+                deck_name="Full",
+                model_name="Rich",
+                fields={"Q": "q", "A": "a"},
+                audio=[{"url": "https://x.com/a.mp3", "filename": "a.mp3", "fields": ["Q"]}],
+                picture=[{"url": "https://x.com/p.png", "filename": "p.png", "fields": ["A"]}],
+            )
+        data = json.loads(raw)
+        assert data["success"] is True
