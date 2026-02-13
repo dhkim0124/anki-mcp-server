@@ -12,11 +12,70 @@ from templates import (
     generate_cloze_back_template,
     generate_cloze_front_template,
     generate_front_template,
+    suggest_style,
     validate_css,
 )
 
+# ─── Server Instructions (Phase 4: Conversational Intelligence) ────────────────
+
+SERVER_INSTRUCTIONS = """\
+You are an intelligent Anki assistant. You help users create, manage, and \
+enrich their Anki decks through natural conversation — they should never \
+need to open the Anki UI directly.
+
+## Conversational Workflow
+
+### Before creating anything, always clarify:
+1. **Deck destination** — Ask which deck to use. Call `list_decks` to show \
+   options and offer to create a new one.
+2. **Note type / style** — Suggest a style based on the content:
+   - Programming, algorithms, code → suggest **Code Style**
+   - Languages, vocabulary, translations → suggest **Duolingo**
+   - Night study, eye comfort → suggest **Dark Mode**
+   - General or unsure → suggest **Default**
+   - If the user wants full control → offer **Custom** (they describe the \
+     look in natural language and you generate the CSS).
+3. **Card type** — Basic (Q&A) or Cloze (fill-in-the-blank), depending on \
+   the content.
+4. **Fields** — For custom models, confirm what fields the user needs \
+   (e.g. Front, Back, Example, Tips, Image, Sound).
+
+### When creating cards:
+- If the user provides a topic without explicit questions, generate card \
+  content yourself and confirm before saving.
+- Prefer `create_card_batch` for multiple cards — it is faster.
+- After creation, suggest syncing with `sync_anki`.
+
+### For destructive operations (delete deck/cards):
+- Always call with `confirm=False` first to show the user what will be deleted.
+- Only proceed with `confirm=True` after explicit user confirmation.
+- Never delete without warning.
+
+### When the user searches for cards:
+- Present results grouped by deck with a summary.
+- Offer to edit or delete specific results.
+
+### Style suggestions:
+- When the user describes a visual style in natural language (e.g. \
+  "dark blue background, mint green accents, fade animations"), generate \
+  the full CSS yourself and pass it to `create_note_type` with style="custom".
+- For predefined styles, just pass the style name: "default", "duolingo", \
+  "dark", or "code".
+
+### Media:
+- Use `add_media` to upload files first, then reference them in card fields.
+- Images: `<img src="filename.png">`
+- Audio: `[sound:filename.mp3]`
+- Or use `create_card_custom` with `audio`/`picture` parameters for URL-based media.
+
+## Response Style
+- Be concise but helpful.
+- After every operation, briefly suggest the logical next step.
+- Use the user's language (if they write in Spanish, respond in Spanish).
+"""
+
 # Initialize the MCP server
-mcp = FastMCP("anki-mcp-server")
+mcp = FastMCP("anki-mcp-server", instructions=SERVER_INSTRUCTIONS)
 
 # Constants for AnkiConnect API communication
 ANKI_CONNECT_URL = "http://localhost:8765"
@@ -87,10 +146,15 @@ async def create_deck(
     """
     try:
         deck_id = await request_anki("createDeck", deck=name)
+        style_name, style_reason = suggest_style(name + " " + description)
         return json.dumps({
             "success": True,
             "deck_id": str(deck_id),
             "message": f"Deck '{name}' created successfully.",
+            "suggestions": [
+                f"Recommended style: '{style_name}' — {style_reason}",
+                "Next: create a note type with `create_note_type` or add cards with `create_card`.",
+            ],
         })
     except AnkiConnectError as e:
         return json.dumps({"success": False, "deck_id": None, "message": f"AnkiConnect error: {e}"})
@@ -229,12 +293,17 @@ async def create_card_batch(
         if failed > 0:
             message += f" {failed} card(s) failed (possibly duplicates)."
 
+        suggestions = ["Sync with AnkiWeb using `sync_anki` to access cards on other devices."]
+        if failed > 0:
+            suggestions.append("Review failed cards — they may be duplicates.")
+
         return json.dumps({
             "success": len(created_ids) > 0,
             "created": len(created_ids),
             "failed": failed,
             "ids": created_ids,
             "message": message,
+            "suggestions": suggestions,
         })
     except AnkiConnectError as e:
         return json.dumps({"success": False, "created": 0, "failed": 0, "ids": [], "message": f"AnkiConnect error: {e}"})
@@ -261,7 +330,7 @@ async def search_cards(
         note_ids = await request_anki("findNotes", query=search_query)
 
         if not note_ids:
-            return json.dumps([])
+            return json.dumps({"results": [], "total": 0, "suggestions": []})
 
         notes_info = await request_anki("notesInfo", notes=note_ids)
 
@@ -293,7 +362,16 @@ async def search_cards(
                 "tags": note.get("tags", []),
             })
 
-        return json.dumps(results)
+        suggestions = []
+        if results:
+            suggestions.append("Use `update_card` with a note_id to edit a specific card.")
+            suggestions.append("Use `delete_cards` with note_ids to remove cards.")
+
+        return json.dumps({
+            "results": results,
+            "total": len(results),
+            "suggestions": suggestions,
+        })
     except AnkiConnectError as e:
         return json.dumps({"error": f"AnkiConnect error: {e}"})
     except Exception as e:
@@ -449,6 +527,10 @@ async def create_note_type(
             "success": True,
             "model_id": model_id,
             "message": f"Note type '{name}' created with style '{style}'.",
+            "suggestions": [
+                f"Create cards using this model with `create_card_custom(model_name='{name}', ...)`.",
+                "You can update the style later with `update_note_type_style` or `update_note_type_template`.",
+            ],
         })
     except AnkiConnectError as e:
         return json.dumps({"success": False, "model_id": None, "message": f"AnkiConnect error: {e}"})
@@ -662,6 +744,10 @@ async def add_media(
             "success": True,
             "media_path": filename,
             "message": f"Media '{filename}' uploaded successfully. Use in cards: {usage}",
+            "suggestions": [
+                f"Reference in card fields: {usage}",
+                "Or use `create_card_custom` with audio/picture parameters to attach media directly.",
+            ],
         })
     except AnkiConnectError as e:
         return json.dumps({"success": False, "media_path": None, "message": f"AnkiConnect error: {e}"})

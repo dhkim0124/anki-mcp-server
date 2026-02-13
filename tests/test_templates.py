@@ -1,4 +1,4 @@
-"""Unit tests for templates module — CSS/HTML templates and validation."""
+"""Unit tests for templates module — CSS/HTML templates, validation, and suggestions."""
 
 import pytest
 
@@ -8,6 +8,7 @@ from templates import (
     generate_cloze_back_template,
     generate_cloze_front_template,
     generate_front_template,
+    suggest_style,
     validate_css,
 )
 
@@ -137,3 +138,44 @@ class TestGenerateClozeBackTemplate:
     def test_empty_fields_fallback(self):
         html = generate_cloze_back_template([])
         assert "{{cloze:Text}}" in html
+
+
+# ─── suggest_style (Phase 4) ──────────────────────────────────────────────────
+
+
+class TestSuggestStyle:
+    def test_code_keywords(self):
+        style, reason = suggest_style("Python algorithms and data structures")
+        assert style == "code"
+
+    def test_language_keywords(self):
+        style, reason = suggest_style("Spanish vocabulary and grammar")
+        assert style == "duolingo"
+
+    def test_dark_keywords(self):
+        style, reason = suggest_style("Night study session, dark mode")
+        assert style == "dark"
+
+    def test_default_fallback(self):
+        style, reason = suggest_style("General knowledge trivia")
+        assert style == "default"
+        assert "default" in reason.lower()
+
+    def test_mixed_content_picks_strongest(self):
+        style, _ = suggest_style("Python function for translating Japanese sentences")
+        # "python", "function" → code (2 hits) vs "japanese", "sentence" → duolingo (2 hits)
+        # Both tied, but code keywords come first alphabetically in dict iteration;
+        # the important thing is it picks one of the relevant styles
+        assert style in ("code", "duolingo")
+
+    def test_case_insensitive(self):
+        style, _ = suggest_style("JAVASCRIPT and TYPESCRIPT programming")
+        assert style == "code"
+
+    def test_empty_string(self):
+        style, _ = suggest_style("")
+        assert style == "default"
+
+    def test_reason_is_nonempty(self):
+        _, reason = suggest_style("SQL database queries")
+        assert len(reason) > 0

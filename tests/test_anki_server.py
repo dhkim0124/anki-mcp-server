@@ -96,6 +96,15 @@ class TestCreateDeck:
         assert data["success"] is True
         assert data["deck_id"] == "1234567890"
         assert "Test Deck" in data["message"]
+        assert "suggestions" in data
+
+    @pytest.mark.asyncio
+    async def test_style_suggestion_for_code_deck(self):
+        client = _mock_post(result=111)
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await create_deck(name="Python Algorithms", description="programming exercises")
+        data = json.loads(raw)
+        assert any("code" in s.lower() for s in data["suggestions"])
 
     @pytest.mark.asyncio
     async def test_anki_error(self):
@@ -275,18 +284,21 @@ class TestSearchCards:
         with patch("anki_server.httpx.AsyncClient", return_value=client):
             raw = await search_cards(query="HTTP")
 
-        results = json.loads(raw)
-        assert len(results) == 1
-        assert results[0]["note_id"] == "111"
-        assert results[0]["deck"] == "CS"
-        assert results[0]["fields"]["Front"] == "What is HTTP?"
+        data = json.loads(raw)
+        assert data["total"] == 1
+        assert data["results"][0]["note_id"] == "111"
+        assert data["results"][0]["deck"] == "CS"
+        assert data["results"][0]["fields"]["Front"] == "What is HTTP?"
+        assert "suggestions" in data
 
     @pytest.mark.asyncio
     async def test_no_results(self):
         client = _mock_post(result=[])
         with patch("anki_server.httpx.AsyncClient", return_value=client):
             raw = await search_cards(query="nonexistent")
-        assert json.loads(raw) == []
+        data = json.loads(raw)
+        assert data["results"] == []
+        assert data["total"] == 0
 
     @pytest.mark.asyncio
     async def test_deck_scoped_search(self):
@@ -309,7 +321,9 @@ class TestSearchCards:
 
         with patch("anki_server.httpx.AsyncClient", return_value=client):
             raw = await search_cards(query="test", deck="MyDeck")
-        assert json.loads(raw) == []
+        data = json.loads(raw)
+        assert data["results"] == []
+        assert data["total"] == 0
 
 
 # ─── update_card ───────────────────────────────────────────────────────────────

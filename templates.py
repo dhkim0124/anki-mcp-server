@@ -167,6 +167,63 @@ def validate_css(css: str) -> tuple[bool, str]:
 # ─── HTML Template Generation ──────────────────────────────────────────────────
 
 
+# ─── Style Suggestion (Phase 4: Conversational Intelligence) ───────────────────
+
+_STYLE_KEYWORDS: dict[str, list[str]] = {
+    "code": [
+        "code", "coding", "programming", "algorithm", "function", "class",
+        "python", "javascript", "typescript", "java", "rust", "go", "c++",
+        "sql", "html", "css", "api", "debug", "syntax", "compiler",
+        "data structure", "leetcode", "regex",
+    ],
+    "duolingo": [
+        "language", "idiom", "vocabulary", "vocab", "translation", "grammar",
+        "verb", "noun", "conjugation", "pronunciation", "spanish", "french",
+        "german", "italian", "portuguese", "japanese", "korean", "chinese",
+        "english", "word", "phrase", "sentence", "dialogue",
+    ],
+    "dark": [
+        "dark", "night", "nocturnal", "eye strain", "low light",
+    ],
+}
+
+
+def suggest_style(content: str) -> tuple[str, str]:
+    """Suggest a template style based on content keywords.
+
+    Analyzes the provided text for topic-related keywords and returns the
+    best-matching predefined style.
+
+    Args:
+        content: Text describing the deck topic or card content.
+
+    Returns:
+        Tuple of (style_name, reason). style_name is one of the BUILTIN_TEMPLATES
+        keys ("default", "duolingo", "dark", "code").
+    """
+    content_lower = content.lower()
+
+    scores: dict[str, int] = {style: 0 for style in _STYLE_KEYWORDS}
+    for style, keywords in _STYLE_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in content_lower:
+                scores[style] += 1
+
+    best_style = max(scores, key=scores.get)  # type: ignore[arg-type]
+    if scores[best_style] == 0:
+        return "default", "No specific topic detected — using clean default style."
+
+    reasons = {
+        "code": "Content appears to be programming-related — Code Style with monospace font and syntax highlighting.",
+        "duolingo": "Content appears to be language-related — Duolingo style with vibrant colors and gamified design.",
+        "dark": "Content suggests night/dark preference — Dark Mode with high contrast for reduced eye strain.",
+    }
+    return best_style, reasons[best_style]
+
+
+# ─── HTML Template Generation ──────────────────────────────────────────────────
+
+
 def generate_front_template(fields: list[str]) -> str:
     """Generate a front HTML template using the first field."""
     first_field = fields[0] if fields else "Front"
