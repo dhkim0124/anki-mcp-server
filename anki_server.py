@@ -324,8 +324,9 @@ async def search_cards(
     """
     try:
         search_query = query
-        if deck:
-            search_query = f'deck:"{deck}" {query}'
+        if deck and "deck:" not in query:
+            escaped_deck = deck.replace('"', '\\"')
+            search_query = f'deck:"{escaped_deck}" {query}'
 
         note_ids = await request_anki("findNotes", query=search_query)
 
@@ -380,32 +381,33 @@ async def search_cards(
 
 @mcp.tool()
 async def update_card(
-    note_id: int,
+    note_id: int | str,
     fields: Dict[str, str],
     tags: List[str] | None = None,
 ) -> str:
     """Update fields of an existing Anki note/card.
 
     Args:
-        note_id: The note ID (obtained from search_cards results)
+        note_id: The note ID (obtained from search_cards results; accepts int or str)
         fields: Dict of field names to new values (e.g. {"Front": "new question", "Back": "new answer"})
         tags: Optional replacement tags list. If provided, replaces all existing tags.
     """
     try:
-        await request_anki("updateNoteFields", note={"id": note_id, "fields": fields})
+        normalized_note_id = int(note_id) if isinstance(note_id, str) else note_id
+        await request_anki("updateNoteFields", note={"id": normalized_note_id, "fields": fields})
 
         if tags is not None:
-            note_info = await request_anki("notesInfo", notes=[note_id])
+            note_info = await request_anki("notesInfo", notes=[normalized_note_id])
             if note_info:
                 old_tags = note_info[0].get("tags", [])
                 if old_tags:
-                    await request_anki("removeTags", notes=[note_id], tags=" ".join(old_tags))
+                    await request_anki("removeTags", notes=[normalized_note_id], tags=" ".join(old_tags))
                 if tags:
-                    await request_anki("addTags", notes=[note_id], tags=" ".join(tags))
+                    await request_anki("addTags", notes=[normalized_note_id], tags=" ".join(tags))
 
         return json.dumps({
             "success": True,
-            "message": f"Note {note_id} updated successfully.",
+            "message": f"Note {normalized_note_id} updated successfully.",
         })
     except AnkiConnectError as e:
         return json.dumps({"success": False, "message": f"AnkiConnect error: {e}"})
@@ -472,6 +474,8 @@ async def create_note_type(
         is_cloze: Whether this is a Cloze (fill-in-the-blank) model. Use {{cloze:FieldName}} in templates.
     """
     try:
+        style = style.lower().strip()
+
         if not fields:
             return json.dumps({"success": False, "model_id": None, "message": "At least one field is required."})
 

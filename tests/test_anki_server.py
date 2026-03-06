@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from anki_server import (
+    MEDIA_MAX_SIZE_BYTES,
     AnkiConnectError,
     add_media,
     create_card,
@@ -129,6 +130,8 @@ class TestListDecks:
         }
         call_count = 0
 
+        get_deck_stats_params = {}
+
         async def mock_post(url, **kwargs):
             nonlocal call_count
             json_data = kwargs.get("json", {})
@@ -139,6 +142,7 @@ class TestListDecks:
             if action == "deckNamesAndIds":
                 resp.json.return_value = _anki_response(names_ids)
             elif action == "getDeckStats":
+                get_deck_stats_params.update(json_data.get("params", {}))
                 resp.json.return_value = _anki_response(stats)
             call_count += 1
             return resp
@@ -157,6 +161,8 @@ class TestListDecks:
         assert decks[0]["name"] == "Default"
         assert decks[0]["total"] == 10
         assert decks[1]["new"] == 8
+        # Regression: getDeckStats must be called with names, not IDs
+        assert get_deck_stats_params.get("decks") == ["Default", "Spanish"]
 
 
 # ─── delete_deck ───────────────────────────────────────────────────────────────
@@ -240,6 +246,22 @@ class TestCreateCardBatch:
         assert data["created"] == 2
         assert data["failed"] == 1
         assert "failed" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_all_fail(self):
+        client = _mock_post(result=[None, None, None])  # all cards failed
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            cards = [
+                {"Front": "Q1", "Back": "A1"},
+                {"Front": "Q2", "Back": "A2"},
+                {"Front": "Q3", "Back": "A3"},
+            ]
+            raw = await create_card_batch(deck_name="Batch", cards=cards)
+        data = json.loads(raw)
+        assert data["success"] is False
+        assert data["created"] == 0
+        assert data["failed"] == 3
+        assert any("duplicate" in s.lower() for s in data.get("suggestions", []))
 
 
 # ─── search_cards ──────────────────────────────────────────────────────────────
@@ -787,6 +809,21 @@ class TestAddMedia:
         data = json.loads(raw)
         assert data["success"] is False
         assert "storage error" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_upload_media_at_max_size_succeeds(self):
+        payload = b"\x00" * MEDIA_MAX_SIZE_BYTES
+        media_b64 = base64.b64encode(payload).decode()
+        client = _mock_post(result="max.png")
+        with patch("anki_server.httpx.AsyncClient", return_value=client):
+            raw = await add_media(
+                filename="max.png",
+                data=media_b64,
+                media_type="image/png",
+            )
+        data = json.loads(raw)
+        assert data["success"] is True
+        assert data["media_path"] == "max.png"
 
 
 # ─── create_card_custom with media ────────────────────────────────────────────

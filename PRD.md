@@ -146,7 +146,7 @@ Usuario: "Crea un estilo personalizado: fondo azul profundo (#0d1117), acento ve
 
 MCP: "Perfecto. Generando CSS personalizado...
 
-      Deck e modelo creados exitosamente.
+      Deck y modelo creados exitosamente.
       Configuración:
       - Nombre: Advanced Learning Deck
       - Campos: Front, Back, Image, Sound, Example, Tips
