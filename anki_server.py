@@ -168,8 +168,8 @@ async def list_decks() -> str:
     try:
         names_and_ids = await request_anki("deckNamesAndIds")
 
-        deck_ids = list(names_and_ids.values())
-        stats = await request_anki("getDeckStats", decks=deck_ids)
+        deck_names = list(names_and_ids.keys())
+        stats = await request_anki("getDeckStats", decks=deck_names)
 
         decks = []
         for name, deck_id in names_and_ids.items():
