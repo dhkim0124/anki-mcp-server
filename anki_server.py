@@ -9,7 +9,9 @@ from config import (
     ALLOWED_MEDIA_TYPES,
     ANKI_CONNECT_URL,
     ANKI_CONNECT_VERSION,
+    ANKI_REQUEST_TIMEOUT,
     MEDIA_MAX_SIZE_BYTES,
+    SEARCH_DEFAULT_LIMIT,
 )
 from instructions import SERVER_INSTRUCTIONS
 from templates import (
@@ -55,7 +57,7 @@ async def request_anki(action: str, **params) -> Any:
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            ANKI_CONNECT_URL, json=request_data, timeout=30.0
+            ANKI_CONNECT_URL, json=request_data, timeout=ANKI_REQUEST_TIMEOUT
         )
         response.raise_for_status()
         data = response.json()
@@ -63,6 +65,45 @@ async def request_anki(action: str, **params) -> Any:
         if data.get("error") is not None:
             raise AnkiConnectError(data["error"])
         return data["result"]
+
+
+def describe_error(e: Exception) -> str:
+    """Readable message for an exception (httpx timeouts have an empty str())."""
+    if isinstance(e, httpx.TimeoutException):
+        return f"AnkiConnect did not answer within {ANKI_REQUEST_TIMEOUT:.0f}s (timeout)"
+    return str(e) or type(e).__name__
+
+
+async def get_deck_stats(deck_names: List[str]) -> Dict[str, Any]:
+    """getDeckStats tolerant of AnkiConnect 2026.10.
+
+    That release fails the whole batch with "Deck counts unavailable." when any
+    requested deck is missing from Anki's deck list (always the case for the
+    empty, hidden "Default" deck). Try the batch first, then fall back to one
+    request per deck in a single `multi` call, skipping decks that fail.
+    """
+    if not deck_names:
+        return {}
+    try:
+        return await request_anki("getDeckStats", decks=deck_names)
+    except AnkiConnectError:
+        pass
+
+    actions = [
+        {"action": "getDeckStats", "params": {"decks": [name]}}
+        for name in deck_names
+    ]
+    responses = await request_anki("multi", actions=actions)
+    stats: Dict[str, Any] = {}
+    for item in responses or []:
+        # multi returns {"result", "error"} objects with version >= 6
+        if isinstance(item, dict) and "error" in item and "result" in item:
+            if item["error"] is not None:
+                continue
+            item = item["result"]
+        if isinstance(item, dict):
+            stats.update(item)
+    return stats
 
 
 # ─── Deck Operations ───────────────────────────────────────────────────────────
@@ -94,35 +135,91 @@ async def create_deck(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "deck_id": None, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "deck_id": None, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "deck_id": None, "message": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
-async def list_decks() -> str:
-    """List all available Anki decks with statistics (total cards, new, due, learning)."""
+async def list_decks(parent: str = "", depth: int = 2) -> str:
+    """List Anki decks with statistics (total cards, new, due, learning).
+
+    Large collections have hundreds of nested decks, so the listing is limited
+    to a branch and a number of levels. Decks cut off by the depth limit are
+    reported through `subdecks` (number of direct children) so you can drill down.
+
+    Args:
+        parent: Full name of a deck whose branch to list (e.g. "3. ESH"), case-insensitive.
+            Empty = whole collection.
+        depth: Levels to show below `parent` (or from the top when no parent).
+            Default 2; 0 = no limit.
+    """
     try:
         names_and_ids = await request_anki("deckNamesAndIds")
 
-        deck_names = list(names_and_ids.keys())
-        stats = await request_anki("getDeckStats", decks=deck_names)
+        parent = parent.strip().strip(":")
+        base_level = 0
+        if parent:
+            match = next((n for n in names_and_ids if n.lower() == parent.lower()), None)
+            if match is None:
+                top = sorted({n.split("::")[0] for n, i in names_and_ids.items() if str(i) != "1"})
+                return json.dumps({
+                    "error": f"Deck '{parent}' not found.",
+                    "top_level_decks": top,
+                })
+            parent = match
+            base_level = parent.count("::") + 1
+
+        def in_branch(name: str) -> bool:
+            return not parent or name == parent or name.startswith(parent + "::")
+
+        def level(name: str) -> int:
+            # parent itself = 0, its children = 1 ... ; top-level decks = 1 without parent
+            return name.count("::") + 1 - base_level
+
+        branch = [n for n in names_and_ids if in_branch(n)]
+        shown = [n for n in branch if depth <= 0 or level(n) <= depth]
+
+        children_count: Dict[str, int] = {}
+        for n in branch:
+            if "::" in n:
+                p = n.rsplit("::", 1)[0]
+                children_count[p] = children_count.get(p, 0) + 1
+
+        stats = await get_deck_stats(shown)
 
         decks = []
-        for name, deck_id in names_and_ids.items():
-            deck_stat = stats.get(str(deck_id), {})
-            decks.append({
-                "name": name,
-                "id": str(deck_id),
-                "total": deck_stat.get("total_in_deck", 0),
-                "new": deck_stat.get("new_count", 0),
-                "due": deck_stat.get("review_count", 0),
-                "learning": deck_stat.get("learn_count", 0),
-            })
+        for name in shown:
+            deck_id = names_and_ids[name]
+            deck_stat = stats.get(str(deck_id))
+            if deck_stat is None and str(deck_id) == "1":
+                continue  # empty default deck (id 1, name localized) hidden by Anki
+            entry: Dict[str, Any] = {"name": name, "id": str(deck_id)}
+            if deck_stat is None:
+                entry.update(total=None, new=None, due=None, learning=None)
+            else:
+                entry.update(
+                    total=deck_stat.get("total_in_deck", 0),
+                    new=deck_stat.get("new_count", 0),
+                    due=deck_stat.get("review_count", 0),
+                    learning=deck_stat.get("learn_count", 0),
+                )
+            if depth > 0 and level(name) == depth and children_count.get(name):
+                entry["subdecks"] = children_count[name]
+            decks.append(entry)
 
-        return json.dumps(decks)
+        hidden = len(branch) - len(shown)
+        return json.dumps({
+            "decks": decks,
+            "shown": len(decks),
+            "hidden_deeper": hidden,
+            "suggestions": [
+                "Call list_decks with parent=<deck name> to drill into a deck with `subdecks`, "
+                "or a larger depth (0 = all levels)."
+            ] if hidden else [],
+        })
     except AnkiConnectError as e:
         return json.dumps({"error": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"error": f"Connection error: {e}"})
+        return json.dumps({"error": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -156,7 +253,7 @@ async def delete_deck(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "message": f"Connection error: {describe_error(e)}"})
 
 
 # ─── Card Operations ───────────────────────────────────────────────────────────
@@ -190,7 +287,7 @@ async def create_card(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "card_id": None, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "card_id": None, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "card_id": None, "message": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -243,19 +340,23 @@ async def create_card_batch(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "created": 0, "failed": 0, "ids": [], "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "created": 0, "failed": 0, "ids": [], "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "created": 0, "failed": 0, "ids": [], "message": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
 async def search_cards(
     query: str,
     deck: str = "",
+    limit: int = SEARCH_DEFAULT_LIMIT,
+    offset: int = 0,
 ) -> str:
     """Search for notes/cards using Anki's search syntax.
 
     Args:
         query: Search query using Anki syntax (e.g. "tag:python", "front:*HTTP*", or plain text)
         deck: Optional deck name to limit search scope
+        limit: Max notes returned with full details (default 50; 0 = no limit, slow on big searches)
+        offset: Number of matching notes to skip (pagination)
     """
     try:
         search_query = query
@@ -268,20 +369,27 @@ async def search_cards(
         if not note_ids:
             return json.dumps({"results": [], "total": 0, "suggestions": []})
 
-        notes_info = await request_anki("notesInfo", notes=note_ids)
+        total_matches = len(note_ids)
+        offset = max(offset, 0)
+        page_ids = note_ids[offset:offset + limit] if limit > 0 else note_ids[offset:]
+        if not page_ids:
+            return json.dumps({"results": [], "total": 0, "total_matches": total_matches,
+                               "suggestions": [f"offset {offset} is past the {total_matches} matches."]})
 
-        # Collect all card IDs to resolve deck names
-        all_card_ids = []
+        notes_info = await request_anki("notesInfo", notes=page_ids)
+
+        # Only the first card of each note is needed to resolve its deck
+        first_card_ids = []
         note_to_cards: Dict[int, List[int]] = {}
         for note in notes_info:
             card_ids = note.get("cards", [])
-            all_card_ids.extend(card_ids)
+            if card_ids:
+                first_card_ids.append(card_ids[0])
             note_to_cards[note["noteId"]] = card_ids
 
-        # Resolve deck names from card info
         card_to_deck: Dict[int, str] = {}
-        if all_card_ids:
-            cards_info = await request_anki("cardsInfo", cards=all_card_ids)
+        if first_card_ids:
+            cards_info = await request_anki("cardsInfo", cards=first_card_ids)
             card_to_deck = {c["cardId"]: c["deckName"] for c in cards_info}
 
         results = []
@@ -299,6 +407,12 @@ async def search_cards(
             })
 
         suggestions = []
+        shown_until = offset + len(results)
+        if shown_until < total_matches:
+            suggestions.append(
+                f"Showing {offset + 1}-{shown_until} of {total_matches} matches: "
+                f"call again with offset={shown_until} for more, or refine the query."
+            )
         if results:
             suggestions.append("Use `update_card` with a note_id to edit a specific card.")
             suggestions.append("Use `delete_cards` with note_ids to remove cards.")
@@ -306,12 +420,13 @@ async def search_cards(
         return json.dumps({
             "results": results,
             "total": len(results),
+            "total_matches": total_matches,
             "suggestions": suggestions,
         })
     except AnkiConnectError as e:
         return json.dumps({"error": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"error": f"Connection error: {e}"})
+        return json.dumps({"error": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -347,7 +462,7 @@ async def update_card(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "message": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -381,7 +496,7 @@ async def delete_cards(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "deleted": 0, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "deleted": 0, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "deleted": 0, "message": f"Connection error: {describe_error(e)}"})
 
 
 # ─── Note Types / Models (Phase 2) ─────────────────────────────────────────────
@@ -474,7 +589,7 @@ async def create_note_type(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "model_id": None, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "model_id": None, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "model_id": None, "message": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -499,7 +614,7 @@ async def get_note_types() -> str:
     except AnkiConnectError as e:
         return json.dumps({"error": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"error": f"Connection error: {e}"})
+        return json.dumps({"error": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -548,7 +663,7 @@ async def create_card_custom(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "card_id": None, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "card_id": None, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "card_id": None, "message": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -575,7 +690,7 @@ async def update_note_type_style(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "message": f"Connection error: {describe_error(e)}"})
 
 
 @mcp.tool()
@@ -609,7 +724,7 @@ async def update_note_type_template(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "message": f"Connection error: {describe_error(e)}"})
 
 
 # ─── Media (Phase 3) ──────────────────────────────────────────────────────────
@@ -691,7 +806,7 @@ async def add_media(
     except AnkiConnectError as e:
         return json.dumps({"success": False, "media_path": None, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "media_path": None, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "media_path": None, "message": f"Connection error: {describe_error(e)}"})
 
 
 # ─── Sync ──────────────────────────────────────────────────────────────────────
@@ -709,7 +824,7 @@ async def sync_anki() -> str:
     except AnkiConnectError as e:
         return json.dumps({"success": False, "message": f"AnkiConnect error: {e}"})
     except Exception as e:
-        return json.dumps({"success": False, "message": f"Connection error: {e}"})
+        return json.dumps({"success": False, "message": f"Connection error: {describe_error(e)}"})
 
 
 # ─── Entry Point ───────────────────────────────────────────────────────────────

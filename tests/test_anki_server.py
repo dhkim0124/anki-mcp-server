@@ -155,7 +155,7 @@ class TestListDecks:
         with patch("anki_server.httpx.AsyncClient", return_value=client):
             raw = await list_decks()
 
-        decks = json.loads(raw)
+        decks = json.loads(raw)["decks"]
         assert isinstance(decks, list)
         assert len(decks) == 2
         assert decks[0]["name"] == "Default"
@@ -164,6 +164,84 @@ class TestListDecks:
         # Regression: getDeckStats must be called with names, not IDs
         assert get_deck_stats_params.get("decks") == ["Default", "Spanish"]
 
+
+    @pytest.mark.asyncio
+    async def test_fallback_when_default_deck_breaks_batch(self):
+        """AnkiConnect 2026.10 fails the whole getDeckStats batch on the hidden Default deck."""
+        import anki_server
+
+        names_ids = {"Default": 1, "ESH": 2}
+
+        async def fake_request(action, **params):
+            if action == "deckNamesAndIds":
+                return names_ids
+            if action == "getDeckStats":
+                raise anki_server.AnkiConnectError("Deck counts unavailable.")
+            if action == "multi":
+                return [
+                    {"result": None, "error": "Deck counts unavailable."},
+                    {"result": {"2": {"total_in_deck": 7, "new_count": 1,
+                                      "review_count": 2, "learn_count": 0}}, "error": None},
+                ]
+            raise AssertionError(action)
+
+        with patch("anki_server.request_anki", side_effect=fake_request):
+            decks = json.loads(await list_decks())["decks"]
+
+        assert decks == [{"name": "ESH", "id": "2", "total": 7, "new": 1, "due": 2, "learning": 0}]
+
+    @pytest.mark.asyncio
+    async def test_parent_and_depth_filter(self):
+        import anki_server
+
+        names_ids = {"ESH": 1, "ESH::CH01": 2, "ESH::CH01::I": 3, "ESH::CH01::I::A": 4, "English": 5}
+        requested = {}
+
+        async def fake_request(action, **params):
+            if action == "deckNamesAndIds":
+                return names_ids
+            if action == "getDeckStats":
+                requested["decks"] = params["decks"]
+                return {str(names_ids[n]): {"total_in_deck": 1} for n in params["decks"]}
+            raise AssertionError(action)
+
+        with patch("anki_server.request_anki", side_effect=fake_request):
+            data = json.loads(await list_decks(parent="esh", depth=2))
+
+        names = [d["name"] for d in data["decks"]]
+        assert names == ["ESH", "ESH::CH01", "ESH::CH01::I"]
+        assert requested["decks"] == names  # stats only for shown decks
+        assert data["decks"][2]["subdecks"] == 1
+        assert data["hidden_deeper"] == 1
+
+        with patch("anki_server.request_anki", side_effect=fake_request):
+            data = json.loads(await list_decks(parent="Nope"))
+        assert data["top_level_decks"] == ["ESH", "English"]
+
+
+# ─── search_cards limit ────────────────────────────────────────────────────────
+
+
+class TestSearchCardsLimit:
+    @pytest.mark.asyncio
+    async def test_large_search_is_paginated(self):
+        async def fake_request(action, **params):
+            if action == "findNotes":
+                return list(range(1, 121))
+            if action == "notesInfo":
+                assert len(params["notes"]) == 50
+                return [{"noteId": i, "cards": [i * 10], "fields": {}, "modelName": "Basic", "tags": []}
+                        for i in params["notes"]]
+            if action == "cardsInfo":
+                return [{"cardId": c, "deckName": "ESH"} for c in params["cards"]]
+            raise AssertionError(action)
+
+        with patch("anki_server.request_anki", side_effect=fake_request):
+            data = json.loads(await search_cards(query="deck:*"))
+
+        assert data["total"] == 50
+        assert data["total_matches"] == 120
+        assert "offset=50" in data["suggestions"][0]
 
 # ─── delete_deck ───────────────────────────────────────────────────────────────
 

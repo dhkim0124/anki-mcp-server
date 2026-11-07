@@ -74,7 +74,7 @@ The server guides the conversation — it asks clarifying questions about deck, 
 
 | Tool | Description |
 |------|-------------|
-| `list_decks` | List all decks with stats (total, new, due, learning cards) |
+| `list_decks` | List decks with stats (total, new, due, learning); filter a branch with `parent` and levels with `depth` (default 2, 0 = all) |
 | `create_deck` | Create a new deck (supports nested decks with `::`) |
 | `delete_deck` | Delete a deck — requires explicit confirmation |
 
